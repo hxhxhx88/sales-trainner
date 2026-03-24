@@ -11,10 +11,11 @@ export const DEEPGRAM_MODEL = 'nova-2'
 // WebRTC
 export const STUN_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }]
 
-// VAD settings for OpenAI Realtime
+// VAD settings for OpenAI Realtime — tuned for natural conversation
 export const VAD_CONFIG = {
   type: 'server_vad' as const,
-  threshold: 0.5,
-  prefix_padding_ms: 300,
-  silence_duration_ms: 500,
+  threshold: 0.4,
+  prefix_padding_ms: 200,
+  silence_duration_ms: 300,
+  create_response: true,
 }
