@@ -16,14 +16,16 @@ export function useSessionStore() {
   const deepgram = useDeepgramTranscription()
   const endingRef = useRef(false)
 
-  // Keep refs to latest transcript entries for use in endSession
-  const plannerEntriesRef = useRef(deepgram.transcriptEntries)
-  plannerEntriesRef.current = deepgram.transcriptEntries
+  // Keep refs to latest values for use in async callbacks
   const buyerEntriesRef = useRef(webrtc.buyerTranscriptEntries)
   buyerEntriesRef.current = webrtc.buyerTranscriptEntries
   const timerRef = useRef(0)
+  timerRef.current = 0
   const personaRef = useRef(session.selectedPersona)
   personaRef.current = session.selectedPersona
+  // Ref to deepgram's transcribe function (stable)
+  const transcribeRef = useRef(deepgram.transcribe)
+  transcribeRef.current = deepgram.transcribe
 
   const handleExpire = useCallback(() => {
     if (!endingRef.current) {
@@ -34,14 +36,8 @@ export function useSessionStore() {
 
   const timer = useSessionTimer(SESSION_DURATION_SECONDS, handleExpire)
 
-  // Sync planner transcript entries to context
-  useEffect(() => {
-    if (deepgram.transcriptEntries.length > 0) {
-      const latest = deepgram.transcriptEntries[deepgram.transcriptEntries.length - 1]
-      session.addPlannerEntry(latest)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deepgram.transcriptEntries.length])
+  // Keep timer ref up to date
+  timerRef.current = timer.timeRemaining
 
   // Sync buyer transcript entries to context
   useEffect(() => {
@@ -81,24 +77,22 @@ export function useSessionStore() {
       // requestMic returns streams directly — no need to wait for re-render
       const streams = await audio.requestMic()
 
-      // Connect both pipelines in parallel
-      await Promise.all([
-        webrtc.connect(streams.webrtc, session.selectedPersona!.id),
-        deepgram.connect(streams.deepgram),
-      ])
+      // Start recording for post-session transcription (Pipeline B)
+      deepgram.startRecording(streams.deepgram)
+
+      // Connect WebRTC (Pipeline A)
+      await webrtc.connect(streams.webrtc, session.selectedPersona!.id)
     } catch (error) {
       console.error('Session start error:', error)
       session.setError(
         error instanceof Error ? error.message : 'Failed to connect. Please try again.'
       )
       session.setPhase('lobby')
+      deepgram.stopRecording()
       audio.cleanup()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.selectedPersona])
-
-  // Keep timer ref up to date
-  timerRef.current = timer.timeRemaining
 
   const handleEndSession = useCallback(
     async (outcome: SessionOutcome) => {
@@ -108,22 +102,25 @@ export function useSessionStore() {
       timer.stop()
       session.endSession(outcome)
 
-      // Cleanup pipelines
-      deepgram.disconnect()
+      // Stop recording and disconnect WebRTC
+      deepgram.stopRecording()
       webrtc.disconnect()
       audio.cleanup()
 
-      // Merge transcripts from refs (latest values)
-      const merged = mergeTranscripts(
-        plannerEntriesRef.current,
-        buyerEntriesRef.current
-      )
-
       const persona = personaRef.current
 
-      // Grade the session
-      if (merged.length > 0 && persona) {
-        try {
+      try {
+        // Transcribe the recorded audio via server-side Deepgram API
+        const plannerEntries = await transcribeRef.current()
+
+        // Get buyer entries from WebRTC data channel
+        const buyerEntries = buyerEntriesRef.current
+
+        // Merge transcripts
+        const merged = mergeTranscripts(plannerEntries, buyerEntries)
+
+        if (merged.length > 0 && persona) {
+          // Grade the session
           const res = await fetch('/api/grade', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -139,7 +136,6 @@ export function useSessionStore() {
 
           const result = await res.json()
 
-          // Build compliance flags with IDs
           const complianceFlags: ComplianceFlag[] = (result.complianceFlags || []).map(
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             (flag: any, index: number) => ({
@@ -167,9 +163,7 @@ export function useSessionStore() {
             complianceFlags,
             merged
           )
-        } catch (error) {
-          console.error('Grading error:', error)
-          // Still show review with transcript but no scorecard
+        } else {
           session.setGradingResult(
             {
               sessionId: `session-${Date.now()}`,
@@ -177,16 +171,16 @@ export function useSessionStore() {
               grade: 'F',
               rubrics: [],
               strengths: [],
-              improvements: ['Grading failed. Please try again.'],
+              improvements: ['No conversation was recorded.'],
               compliancePassed: false,
-              summary: 'Unable to grade this session. Please try again.',
+              summary: 'No transcript available for grading.',
             },
             [],
             merged
           )
         }
-      } else {
-        // No transcript to grade
+      } catch (error) {
+        console.error('Transcription/grading error:', error)
         session.setGradingResult(
           {
             sessionId: `session-${Date.now()}`,
@@ -194,9 +188,9 @@ export function useSessionStore() {
             grade: 'F',
             rubrics: [],
             strengths: [],
-            improvements: ['No conversation was recorded.'],
+            improvements: ['Grading failed. Please try again.'],
             compliancePassed: false,
-            summary: 'No transcript available for grading.',
+            summary: 'Unable to grade this session. Please try again.',
           },
           [],
           []

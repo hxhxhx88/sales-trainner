@@ -11,7 +11,6 @@ interface MeetingRoomProps {
   isMuted: boolean
   timerFormatted: string
   timeRemaining: number
-  audioRef: React.RefObject<HTMLAudioElement | null>
   onToggleMute: () => void
   onEndSession: () => void
 }
@@ -22,15 +21,11 @@ export function MeetingRoom({
   isMuted,
   timerFormatted,
   timeRemaining,
-  audioRef,
   onToggleMute,
   onEndSession,
 }: MeetingRoomProps) {
   return (
     <div className="min-h-screen bg-zinc-950 flex flex-col relative">
-      {/* Hidden audio element for AI voice playback */}
-      <audio ref={audioRef} autoPlay playsInline />
-
       {/* Timer */}
       <SessionTimer formatted={timerFormatted} timeRemaining={timeRemaining} />
 

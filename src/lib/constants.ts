@@ -6,7 +6,7 @@ export const MEDIA_RECORDER_TIMESLICE_MS = 250
 // Models — use latest available
 export const OPENAI_REALTIME_MODEL = 'gpt-4o-realtime-preview'
 export const OPENAI_GRADING_MODEL = 'gpt-4o'
-export const DEEPGRAM_MODEL = 'nova-3'
+export const DEEPGRAM_MODEL = 'nova-2'
 
 // WebRTC
 export const STUN_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }]
