@@ -64,7 +64,7 @@ The prototype implements exactly one flow — a simulated sales meeting followed
 
 **After session:** The review page shows the full transcript, compliance violations, and a detailed scorecard with rubric-based grading.
 
-**Language:** For this prototype, both the AI and the user speak **Mandarin**. The tech stack must support Mandarin STT and TTS.
+**Language:** For this prototype, both the AI and the user speak **Mandarin**. The AI uses an audio-native model (OpenAI Realtime API) so no separate TTS is needed.
 
 **Buyer Personas (4 for prototype, each with a distinct AI voice):**
 
@@ -75,7 +75,8 @@ The prototype implements exactly one flow — a simulated sales meeting followed
 | **Auntie Wong** — Conservative Risk-Averse Buyer | Beginner | "Will I lose money?", "I just want to save in the bank" |
 | **Kevin Leung** — Young Professional | Intermediate | "Why not just buy VOO?", "I can use Endowus/StashAway" |
 
-**Compliance Engine (5 rules, checked post-session during review):**
+**Compliance Engine (LLM-based, checked post-session during review):**
+Uses GPT-5.4 to analyze the full transcript for compliance violations. Key rules:
 1. Guaranteeing non-guaranteed returns (保證非保證回報)
 2. Misrepresentation of product features
 3. Pressure selling ("limited time", "price going up")
@@ -123,41 +124,15 @@ The prototype implements exactly one flow — a simulated sales meeting followed
 
 ---
 
-## 6. Success Metrics (Prototype)
-
-| Metric | Target | How to Measure |
-|---|---|---|
-| Voice conversation works in Mandarin | Yes/No | Manual test: 2-min conversation in Mandarin |
-| Response latency | < 500ms (prototype) | Measure time from user speech end to AI speech start |
-| Zoom-like meeting UI feels realistic | Yes/No | Manual review: no transcript/alerts shown during session |
-| Transcript accuracy (domain terms) | > 80% for boosted keywords | Manual review of 10 transcribed insurance terms in review page |
-| Compliance detection | Catches "guaranteed return" in Mandarin | Manual test with known violation phrases |
-| Win/lose mechanic works | Yes/No | AI ends session on successful persuasion; time limit triggers loss |
-| Grading relevance | Scorecard references specific conversation moments | Manual review of 5 scorecards |
-| End-to-end flow | Complete flow works | Join meeting → converse → session ends → review page displayed |
-
----
-
-## 7. Risks & Mitigations
-
-| Risk | Likelihood | Impact | Mitigation |
-|---|---|---|---|
-| Mandarin STT accuracy insufficient | Medium | High — bad transcript = bad grading | Deepgram Nova-3 keyword boosting + fall back to OpenAI built-in transcription |
-| OpenAI Realtime API latency > 300ms | Low | Medium — less realistic feel | Acceptable for prototype; monitor and optimize |
-| Compliance regex too simplistic | High | Medium — misses nuanced violations | Prototype limitation; v2 uses LLM-based compliance checking |
-| API costs during testing | Medium | Low — budget concern | 5-minute session cap; monitor usage |
-| Safari WebRTC compatibility | Medium | Medium — some users on Safari | Detect browser; use fallback audio format; document Chrome as primary |
-| Win/lose detection unreliable | Medium | Medium — unclear session outcome | AI persona prompt includes explicit "buy" decision signal; fallback to time-based loss |
-
----
-
-## 8. Resolved Decisions
+## 6. Resolved Decisions
 
 1. **Voice selection:** Each persona has a **distinct** AI voice (OpenAI offers multiple).
-2. **Session duration limit:** 5 minutes — enough to demonstrate the concept, keeps API costs manageable.
-3. **Grading LLM:** Claude Sonnet via Vercel AI SDK — better structured output, compliance-focused grading.
-4. **Deepgram model:** **Nova-3** (latest).
-5. **Conversation LLM:** **GPT-5.4** (latest, supports `json_schema` in `response_format`).
+2. **Session duration limit:** 5 minutes.
+3. **LLM:** **GPT-5.4** for everything — conversation (Realtime API), compliance checking, and grading. Uses `json_schema` in `response_format` for structured output. No separate TTS needed (audio-native model).
+4. **Deepgram model:** **Nova-3** (latest) for background transcription.
+5. **SDK:** Official provider SDKs only (`openai`, `@deepgram/sdk`). No Vercel AI SDK.
 6. **Language:** **Mandarin only** for prototype.
 7. **Session UI:** **Zoom-like meeting interface** — no transcript/alerts during session, all shown in post-session review.
-8. **Win/lose mechanic:** AI buyer can decide to purchase (win) or time runs out (lose).
+8. **Win/lose mechanic:** AI persona system prompt includes instruction to output `__SUCCESS__` when persuaded to buy. Time expiry = lose.
+9. **Browser:** **Chrome only** for prototype.
+10. **Budget:** No cost constraints for prototyping — use the best technology available.

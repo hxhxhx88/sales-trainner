@@ -36,7 +36,7 @@ The system uses a **Dual-Pipeline Hybrid Architecture** that separates conversat
 │                                                                   │
 │  ┌─── BACKGROUND (during session) ────────────────────────────┐ │
 │  │  Transcript Merger (planner ◄─ Deepgram, buyer ◄─ DataCh)  │ │
-│  │  Compliance Checker (regex on final entries)                │ │
+│  │  Compliance Checker (LLM-based, post-session)               │ │
 │  │  Win/Lose Detection (AI signals purchase decision)          │ │
 │  │  All stored silently — revealed only in review              │ │
 │  └─────────────────────────────────────────────────────────────┘ │
@@ -51,7 +51,7 @@ The system uses a **Dual-Pipeline Hybrid Architecture** that separates conversat
           POST /api/grade
                     │
                     ▼
-         Claude Sonnet (Vercel AI SDK)
+         GPT-5.4 (via openai SDK)
                     │
                     ▼
          Structured Scorecard JSON
@@ -85,13 +85,12 @@ The pipelines are independent. Deepgram failure does not interrupt the voice con
 | Language | TypeScript | 6.0.x | Type safety |
 | UI Library | shadcn/ui | latest | Pre-built accessible components |
 | Styling | Tailwind CSS | 4.2.x | Utility-first CSS |
-| Voice AI | OpenAI Realtime API (via `openai` SDK) | 6.32.x (WebRTC mode) | Conversational buyer persona (GPT-5.4) |
-| STT | Deepgram Nova-3 | Streaming WebSocket (`@deepgram/sdk` 5.x) | Keyword-boosted transcription |
-| Grading LLM | Claude Sonnet | via Vercel AI SDK | Post-session structured grading |
-| AI SDK | Vercel AI SDK (`ai`) | 6.0.x | `generateObject` for structured LLM output |
-| Anthropic SDK | `@anthropic-ai/sdk` | 0.80.x | Claude API access |
+| Voice AI | OpenAI Realtime API (via `openai` SDK) | 6.32.x (WebRTC mode) | Conversational buyer persona (GPT-5.4), audio-native (no separate TTS) |
+| STT | Deepgram Nova-3 | Streaming WebSocket (`@deepgram/sdk` 5.x) | Keyword-boosted Mandarin transcription |
+| Grading + Compliance LLM | GPT-5.4 | via `openai` SDK | Post-session compliance checking and structured grading (`json_schema` response_format) |
 | Validation | Zod | 4.3.x | Request/response schema validation |
 | State | React Context + Hooks | React 19.2.x | Client-side state (no external store) |
+| Browser | Chrome only | — | Prototype targets Chrome; no Safari/Firefox fallbacks |
 
 ---
 
@@ -161,12 +160,12 @@ interface ComplianceFlag {
   transcriptEntryId: string
 }
 
+// Compliance rules are defined as natural-language descriptions for LLM-based checking.
+// GPT-5.4 analyzes the full transcript post-session against these rules.
 interface ComplianceRule {
   id: string
   name: string
-  description: string
-  patterns: RegExp[]                      // patterns in EN, ZH-TW, ZH-CN
-  keywords: string[]
+  description: string                     // natural language description for LLM prompt
   severity: 'warning' | 'violation'
   message: { en: string; zh: string }
 }
@@ -239,7 +238,7 @@ Generates a short-lived client secret for the OpenAI Realtime API WebRTC session
      }
    }
    ```
-   The system prompt includes instructions for the AI to signal a "buy" decision via a specific data channel message when persuaded, enabling the win/lose mechanic.
+   The system prompt includes instructions for the AI to output `__SUCCESS__` in a text data channel message when it decides to buy the product, enabling win detection on the client side.
 3. Return the `client_secret` from OpenAI's response
 
 ### 4.2 `GET /api/deepgram-token` — Deepgram Token
@@ -263,10 +262,8 @@ For prototype: returns the Deepgram API key directly. Production: would use Deep
     { "id": "...", "speaker": "buyer", "text": "你好，我想了解...", "timestamp": 3.2, "isFinal": true }
   ],
   "personaId": "skeptical-shenzhen-exec",
-  "complianceFlags": [
-    { "id": "...", "ruleId": "guaranteed-returns", "severity": "violation", "matchedText": "保證回報" }
-  ],
-  "durationSeconds": 180
+  "durationSeconds": 180,
+  "outcome": "win"
 }
 ```
 
@@ -289,8 +286,9 @@ For prototype: returns the Deepgram API key directly. Production: would use Deep
 
 **Implementation:**
 - Validate with Zod
-- Build prompt from `grading-prompts.ts` template, inserting transcript, persona context, and compliance flags
-- Call Claude Sonnet via `generateObject` (Vercel AI SDK) with Zod `Scorecard` schema
+- Build prompt from `grading-prompts.ts` template, inserting transcript, persona context
+- Call GPT-5.4 via `openai` SDK with `json_schema` in `response_format` for structured output
+- GPT-5.4 performs both compliance checking (analyzing transcript against rules) and rubric-based grading in a single call
 - Return structured result
 
 (Manager dashboard APIs removed — prototype focuses on single session + review only.)
@@ -349,10 +347,8 @@ UI shows ONLY:
   → No transcript, no compliance alerts, no interruptions
 
 Background processing:
-  → Compliance checker watches planner transcript (isFinal === true)
-  → Runs regex patterns from compliance-rules.ts
-  → Creates ComplianceFlag if match found (stored silently for review)
-  → Win/lose detector monitors AI data channel for purchase decision signal
+  → Transcript entries accumulated silently (for post-session LLM compliance check + grading)
+  → Win/lose detector monitors AI data channel for __SUCCESS__ signal (purchase decision)
 ```
 
 ### 5.3 Session End
@@ -367,24 +363,14 @@ Session ends when: (a) AI signals "buy" decision (win), (b) time limit expires (
 5. Close RTCPeerConnection
 6. Stop all MediaStream tracks
 7. Merge transcripts (Deepgram planner + DataChannel buyer, sorted by timestamp)
-8. POST /api/grade { transcript, personaId, complianceFlags, durationSeconds, outcome }
+8. POST /api/grade { transcript, personaId, durationSeconds, outcome }
+   → GPT-5.4 performs compliance checking + grading in one call
 9. Navigate to Review page → display full transcript, compliance flags, scorecard, win/lose outcome
 ```
 
-### 5.4 Audio Format Handling
+### 5.4 Audio Format
 
-| Browser | MediaRecorder MIME | Deepgram Support |
-|---|---|---|
-| Chrome | `audio/webm;codecs=opus` | Supported |
-| Firefox | `audio/webm;codecs=opus` | Supported |
-| Safari | `audio/mp4` (fallback) | Supported |
-
-Detection logic:
-```typescript
-const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-  ? 'audio/webm;codecs=opus'
-  : 'audio/mp4'
-```
+Prototype targets **Chrome only**. Uses `audio/webm;codecs=opus` for MediaRecorder → Deepgram.
 
 ---
 
@@ -439,7 +425,6 @@ app/layout.tsx
 | `use-audio-pipeline` | Mic access, stream forking | `micStream`, `deepgramStream`, `isReady`, `cleanup` |
 | `use-webrtc-session` | OpenAI Realtime WebRTC lifecycle (GPT-5.4) | `connect()`, `disconnect()`, `connectionState`, `isAISpeaking`, `dataChannelEvents`, `buyDecision` |
 | `use-deepgram-transcription` | Deepgram Nova-3 WebSocket streaming | `connect()`, `disconnect()`, `transcript[]`, `interimText` |
-| `use-compliance-checker` | Background compliance rule matching | `flags[]`, `checkTranscript()` |
 | `use-session-store` | Session lifecycle orchestration | `session`, `startSession()`, `endSession()`, `mergedTranscript`, `scorecard`, `sessionPhase`, `outcome` |
 | `use-session-timer` | Countdown timer with auto-end | `timeRemaining`, `isExpired` |
 
@@ -478,32 +463,41 @@ Full list: ~200 terms defined in `src/lib/hk-insurance-vocab.ts`.
 
 ---
 
-## 9. Compliance Rules — Detail
+## 9. Compliance Rules — LLM-Based
 
-| Rule ID | Name | Severity | Pattern Examples |
+Compliance checking is performed **post-session** by GPT-5.4, which analyzes the full transcript against these rules:
+
+| Rule ID | Name | Severity | Description |
 |---|---|---|---|
-| `guaranteed-returns` | Guaranteeing non-guaranteed returns | violation | `/保證.*回報/`, `/guarantee.*return/i`, `/保證.*紅利/`, `/一定會有/` |
-| `misrepresentation` | Product misrepresentation | violation | `/百分百.*賠/`, `/全部都保/`, `/cover everything/i` |
-| `pressure-selling` | Pressure selling tactics | warning | `/限時/`, `/今日唔買.*遲/`, `/price.*going up/i`, `/last chance/i` |
-| `missing-risk` | Missing risk disclosure | warning | Triggered if planner discusses investment products for 60+ seconds without mentioning risk terms |
-| `unlicensed-advice` | Specific investment advice | warning | `/你應該買/`, `/you should invest in/i`, `/一定要買/` |
+| `guaranteed-returns` | Guaranteeing non-guaranteed returns | violation | Planner promises or implies guaranteed returns on non-guaranteed products (e.g., 保證回報, 一定會有) |
+| `misrepresentation` | Product misrepresentation | violation | Planner makes false or misleading claims about product coverage or features |
+| `pressure-selling` | Pressure selling tactics | warning | Planner uses urgency, scarcity, or time pressure to push a sale |
+| `missing-risk` | Missing risk disclosure | warning | Planner discusses investment-linked products without adequate risk disclosure |
+| `unlicensed-advice` | Specific investment advice | warning | Planner gives specific investment recommendations beyond their license scope |
 
-Rules match against Traditional Chinese (HK standard), Simplified Chinese (mainland buyers), and English.
+The LLM identifies violations with specific quotes from the transcript, providing better accuracy than regex patterns.
 
 ---
 
-## 10. Grading Prompt Structure
+## 10. Grading + Compliance Prompt Structure
 
-The grading prompt sent to Claude Sonnet follows this structure:
+GPT-5.4 performs both compliance checking and grading in a single call, using `json_schema` in `response_format` for structured output.
 
 ```
 SYSTEM: You are an expert Hong Kong insurance sales trainer and compliance officer.
-You are grading a roleplay session between a novice financial planner and a simulated buyer.
+You are reviewing a roleplay session between a novice financial planner and a simulated buyer.
+
+Your task:
+1. Analyze the transcript for compliance violations (see COMPLIANCE RULES below)
+2. Grade the planner's performance on the rubric dimensions
 
 CONTEXT:
 - Buyer Persona: {persona.name} — {persona.description}
 - Session Duration: {durationSeconds} seconds
-- Compliance Flags Detected: {complianceFlags.length}
+- Session Outcome: {outcome} (win/lose/manual end)
+
+COMPLIANCE RULES:
+{list of compliance rules with descriptions}
 
 RUBRIC:
 Grade on these dimensions (score 0–100 each):
@@ -517,13 +511,14 @@ Grade on these dimensions (score 0–100 each):
 TRANSCRIPT:
 {formatted transcript with timestamps and speaker labels}
 
-COMPLIANCE FLAGS:
-{list of detected violations with timestamps}
-
-OUTPUT: Return a JSON object matching the Scorecard schema. Be specific — reference
-exact moments in the conversation. Feedback should be actionable for a first-year planner.
+OUTPUT: Return a JSON object matching the schema. Include:
+- complianceFlags: any violations found, with exact quotes from the transcript
+- rubric scores with specific feedback referencing conversation moments
+- overall assessment
 Grade firmly but fairly. A session with any compliance violation cannot score above B overall.
 ```
+
+The `response_format: { type: "json_schema", json_schema: ... }` ensures GPT-5.4 returns valid structured JSON matching the Scorecard + ComplianceFlag schemas.
 
 ---
 
@@ -569,13 +564,12 @@ sales-trainner/
 │   │   ├── use-audio-pipeline.ts
 │   │   ├── use-webrtc-session.ts
 │   │   ├── use-deepgram-transcription.ts
-│   │   ├── use-compliance-checker.ts
 │   │   ├── use-session-store.ts
 │   │   └── use-session-timer.ts
 │   ├── lib/
 │   │   ├── types.ts
 │   │   ├── personas.ts
-│   │   ├── compliance-rules.ts
+│   │   ├── compliance-rules.ts          # natural-language rule descriptions for LLM prompt
 │   │   ├── hk-insurance-vocab.ts
 │   │   ├── grading-prompts.ts
 │   │   └── constants.ts
@@ -595,7 +589,7 @@ sales-trainner/
 | **4. Audio Pipeline** | Mic → dual stream → WebRTC + Deepgram | Voice conversation working |
 | **5. Meeting UI** | Zoom-like lobby + meeting room + review page | Full user-facing experience |
 | **6. Win/Lose** | AI buy signal detection, timer countdown | Game mechanic working |
-| **7. Polish** | Error handling, Safari fallback, edge cases | Demo-ready prototype |
+| **7. Polish** | Error handling, edge cases | Demo-ready prototype |
 
 ---
 
@@ -603,10 +597,10 @@ sales-trainner/
 
 - **No persistence:** In-memory store resets on server restart
 - **No auth:** Single-user prototype
-- **Mandarin only:** No Cantonese or English support in this prototype
+- **Mandarin only:** No Cantonese or English support
+- **Chrome only:** No Safari/Firefox support
 - **No manager features:** No dashboard, team tracking, or multi-user views
-- **Compliance is regex-based:** Will miss nuanced violations; production needs LLM-based checking
-- **No custom rubrics:** Grading rubric is hardcoded; production allows manager uploads
+- **No custom rubrics:** Grading rubric is hardcoded
 - **Single browser tab:** No multi-device/multi-user support
 - **API key exposure risk:** Deepgram token endpoint returns raw key; production needs scoped tokens
 - **No rate limiting:** API routes have no throttling
